@@ -1,7 +1,6 @@
-
 <#PSScriptInfo
 
-.VERSION 1.10
+.VERSION 1.11
 
 .GUID fe3d3698-52fc-40e8-a95c-bbc67a507ed1
 
@@ -40,7 +39,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
+    # ComputerName is optional. If not specified, localhost is used.
     [ValidateNotNullOrEmpty()]
     [string[]]$ComputerName,
 	
@@ -52,8 +51,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $scriptBlock = {
+    if ($null -ne $using) {
+        # $using is only available if this is being called with a remote session
+        $VerbosePreference = $using:VerbosePreference
+    }
 
-    $VerbosePreference = $using:VerbosePreference
     function Test-RegistryKey {
         [OutputType('bool')]
         [CmdletBinding()]
@@ -125,19 +127,23 @@ $scriptBlock = {
         { Test-RegistryValueNotNull -Key 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Value 'PendingFileRenameOperations2' }
         { 
             # Added test to check first if key exists, using "ErrorAction ignore" will incorrectly return $true
-            'HKLM:\SOFTWARE\Microsoft\Updates' | Where-Object { test-path $_ -PathType Container } | ForEach-Object {            
-                (Get-ItemProperty -Path $_ -Name 'UpdateExeVolatile' -ErrorAction Ignore | Select-Object -ExpandProperty UpdateExeVolatile) -ne 0 
+            'HKLM:\SOFTWARE\Microsoft\Updates' | Where-Object { test-path $_ -PathType Container } | ForEach-Object {
+                if(Test-Path "$_\UpdateExeVolatile" ){ 
+                    (Get-ItemProperty -Path $_ -Name 'UpdateExeVolatile' | Select-Object -ExpandProperty UpdateExeVolatile) -ne 0 
+                }else{ 
+                    $false 
+                }
             }
         }
         { Test-RegistryValue -Key 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' -Value 'DVDRebootSignal' }
-        { Test-RegistryKey -Key 'HKLM:\SOFTWARE\Microsoft\ServerManager\CurrentRebootAttemps' }
+        { Test-RegistryKey -Key 'HKLM:\SOFTWARE\Microsoft\ServerManager\CurrentRebootAttempts' }
         { Test-RegistryValue -Key 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon' -Value 'JoinDomain' }
         { Test-RegistryValue -Key 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon' -Value 'AvoidSpnSet' }
         {
             # Added test to check first if keys exists, if not each group will return $Null
             # May need to evaluate what it means if one or both of these keys do not exist
-            ( 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' | Where-Object { test-path $_ } | %{ (Get-ItemProperty -Path $_ ).ComputerName } ) -ne 
-            ( 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' | Where-Object { Test-Path $_ } | %{ (Get-ItemProperty -Path $_ ).ComputerName } )
+            ( 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' | Where-Object { test-path $_ } | % { (Get-ItemProperty -Path $_ ).ComputerName } ) -ne 
+            ( 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' | Where-Object { Test-Path $_ } | % { (Get-ItemProperty -Path $_ ).ComputerName } )
         }
         {
             # Added test to check first if key exists
@@ -155,6 +161,12 @@ $scriptBlock = {
     }
 }
 
+# if ComputerName was not specified, then use localhost 
+# to ensure that we don't create a Session.
+if ($null -eq $ComputerName) {
+    $ComputerName = "localhost"
+}
+
 foreach ($computer in $ComputerName) {
     try {
         $connParams = @{
@@ -169,10 +181,17 @@ foreach ($computer in $ComputerName) {
             IsPendingReboot = $false
         }
 
-        $psRemotingSession = New-PSSession @connParams
+        if ($computer -in ".", "localhost", $env:COMPUTERNAME ) {        
+            if (-not ($output.IsPendingReboot = Invoke-Command -ScriptBlock $scriptBlock)) {
+                $output.IsPendingReboot = $false
+            }
+        }
+        else {
+            $psRemotingSession = New-PSSession @connParams
         
-        if (-not ($output.IsPendingReboot = Invoke-Command -Session $psRemotingSession -ScriptBlock $scriptBlock)) {
-            $output.IsPendingReboot = $false
+            if (-not ($output.IsPendingReboot = Invoke-Command -Session $psRemotingSession -ScriptBlock $scriptBlock)) {
+                $output.IsPendingReboot = $false
+            }
         }
         [pscustomobject]$output
     } catch {
